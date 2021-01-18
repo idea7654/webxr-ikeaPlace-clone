@@ -1,13 +1,11 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 
 <head>
-    <meta charset='utf-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
-    <meta name='mobile-web-app-capable' content='yes'>
-    <meta name='apple-mobile-web-app-capable' content='yes'>
-    <link rel='stylesheet' href='css/style.css'>
-    <title>WebXR</title>
+    <title>three.js ar - hit test</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <link type="text/css" rel="stylesheet" href="main.css">
 </head>
 
 <style>
@@ -22,15 +20,232 @@
 </style>
 
 <body>
-    <div id="overlay">
-        <div class="info-area">
-            <div id="info"></div>
-            <button id="xr-button" disabled>XR not found</button>
-            <div id="warn"></div>
-            <div id="artInfo" style="visibility: hidden; background-color: beige; float: right; width: 100px; height: 100px"></div>
+    <div>
+        <div id="warn"></div>
+        <div style="display: flex; justify-content: flex-end">
+            <button style="width: 100px; height: 100px;" id="reset">재배치</button>
         </div>
+
     </div>
-    <script type="module" src="index.js">
+
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three/build/three.module.js';
+        import {
+            ARButton
+        } from 'https://threejs.org/examples/jsm/webxr/ARButton.js';
+        import {
+            ColladaLoader
+        } from 'https://threejs.org/examples/jsm/loaders/ColladaLoader.js';
+
+        let container;
+        let camera, scene, renderer;
+        let controller;
+
+        let reticle;
+        let model = null;
+        let initialX = null;
+
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+
+        init();
+        animate();
+
+        function GetURLParameter(sParam) {
+            const sPageURL = window.location.search.substring(1);
+            const sURLVariables = sPageURL.split('&');
+            for (let i = 0; i < sURLVariables.length; i++) {
+                const sParameterName = sURLVariables[i].split('=');
+                if (sParameterName[0] == sParam) {
+                    return sParameterName[1];
+                }
+            }
+        }
+
+        function init() {
+            container = document.createElement('div');
+            document.body.appendChild(container);
+
+            scene = new THREE.Scene();
+
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+            const loader = new ColladaLoader();
+            let modelParam = null;
+            switch (GetURLParameter("model")) {
+                case "chair":
+                    modelParam = "model.dae"
+            }
+            if (modelParam) {
+                loader.load(modelParam, (collada) => {
+                    model = new THREE.Object3D();
+                    const box = new THREE.Box3().setFromObject(collada.scene);
+
+                    const c = box.getCenter(new THREE.Vector3());
+                    const size = box.getSize(new THREE.Vector3());
+
+                    collada.scene.position.set(-c.x, size.y / 2 - c.y, -c.z);
+
+                    model.add(collada.scene);
+                });
+            }
+            //---
+            //--- light
+            const light = new THREE.AmbientLight(0xFFFFFF);
+            scene.add(light);
+            //---
+
+            document.getElementById('warn').innerHTML = '바닥을 비추어보세요!';
+
+            renderer = new THREE.WebGLRenderer({
+                antialias: true,
+                alpha: true
+            });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            container.appendChild(renderer.domElement);
+
+            document.body.appendChild(ARButton.createButton(renderer, {
+                requiredFeatures: ['hit-test'],
+                optionalFeatures: ['dom-overlay'],
+                domOverlay: {
+                    root: document.body
+                }
+            }));
+
+            function onSelect() {
+                if (reticle.visible && model) {
+                    model.position.setFromMatrixPosition(reticle.matrix);
+                    scene.add(model);
+                    reticle.visible = false;
+                    hitTestSource.cancel();
+                    hitTestSource = null;
+                    document.getElementById('warn').innerHTML = '';
+                    controller.removeEventListener('select', onSelect);
+                    document.body.addEventListener("touchstart", handleTouchStart);
+                    document.body.addEventListener("touchmove", handleTouchMove);
+                    document.body.addEventListener('touchend', handleTouchEnd);
+                }
+            }
+
+            controller = renderer.xr.getController(0);
+            controller.addEventListener('select', onSelect);
+            scene.add(controller);
+
+            reticle = new THREE.Mesh(
+                new THREE.RingBufferGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
+                new THREE.MeshBasicMaterial({
+                    color: 0x00ff00
+                })
+            );
+            reticle.matrixAutoUpdate = false;
+            reticle.visible = false;
+            scene.add(reticle);
+            //
+            document.getElementById('reset').onclick = (ev) => {
+                if (model) {
+                    model.visible = false;
+                    reticle.visible = true;
+                    hitTestSourceRequested = false;
+                    document.body.addEventListener('click', placeObject);
+                    //controller.addEventListener('select', onSelect);
+                }
+                ev.stopPropagation();
+            }
+            window.addEventListener('resize', onWindowResize, false);
+        }
+        
+        function placeObject(e){
+            e.stopPropagation();
+            model.position.setFromMatrixPosition(reticle.matrix);
+            model.visible = true;
+            reticle.visible = false;
+            hitTestSource.cancel();
+            hitTestSource = null;
+            document.getElementById('warn').innerHTML = '';
+            document.removeEventListener('click', placeObject);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function handleTouchStart(e) {
+            initialX = e.touches[0].clientX;
+        };
+
+        function handleTouchMove(e) {
+            if (initialX !== null) {
+                const currentX = e.touches[0].clientX;
+
+                let diffX = initialX - currentX;
+
+                if (diffX > 0) {
+                    setInterval(model.rotation.y -= 0.03, 33);
+                } else {
+                    setInterval(model.rotation.y += 0.03, 33);
+                }
+            }
+        }
+
+        function handleTouchEnd() {
+            initialX = null;
+        }
+
+        //
+
+        function animate() {
+            renderer.setAnimationLoop(render);
+        }
+
+        function update() {
+            const div = document.getElementById('warn');
+            if (reticle.visible && !model) {
+                div.innerHTML = "모델 로딩중...";
+            }
+            if (reticle.visible && model) {
+                reticle.material.color.setHex(0x0fff00);
+                warn.innerHTML = '눌러서 설치';
+            }
+        }
+
+        function render(timestamp, frame) {
+            if (frame) {
+                const referenceSpace = renderer.xr.getReferenceSpace();
+                const session = renderer.xr.getSession();
+                if (hitTestSourceRequested === false) {
+                    session.requestReferenceSpace('viewer').then(function(referenceSpace) {
+                        session.requestHitTestSource({
+                            space: referenceSpace
+                        }).then(function(source) {
+                            hitTestSource = source;
+                        });
+                    });
+                    session.addEventListener('end', function() {
+                        hitTestSourceRequested = false;
+                        hitTestSource = null;
+                    });
+                    hitTestSourceRequested = true;
+                }
+
+                if (hitTestSource) {
+                    const hitTestResults = frame.getHitTestResults(hitTestSource);
+                    if (hitTestResults.length) {
+                        const hit = hitTestResults[0];
+                        reticle.visible = true;
+                        reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
+                    } else {
+                        reticle.visible = false;
+                    }
+                }
+            }
+            update();
+            renderer.render(scene, camera);
+        }
+
     </script>
 </body>
 
